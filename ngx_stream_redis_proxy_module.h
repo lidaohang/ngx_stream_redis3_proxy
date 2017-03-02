@@ -1,10 +1,3 @@
-/*
- * Author: lihang <lihanglucien@didichuxing.com>
- *
- * File: ngx_redis_protocol.h
- * Create Date: 2017-01-20 12:03:15
- *
- */
 
 #ifndef NGX_STREAM_REDIS_PROXY_MODULE_H
 #define NGX_STREAM_REDIS_PROXY_MODULE_H
