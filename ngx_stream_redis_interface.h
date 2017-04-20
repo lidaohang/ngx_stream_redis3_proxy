@@ -17,10 +17,9 @@ ngx_int_t ngx_stream_redis_init();
 ngx_int_t ngx_stream_redis_destroy();
 
 
-ngx_int_t ngx_stream_redis_cluster_nodes(ngx_stream_session_t *s);
 ngx_int_t ngx_stream_redis_asking(ngx_stream_session_t *s);
 
-ngx_int_t ngx_stream_redis_process_request(ngx_stream_session_t *s, ngx_buf_t *b);
+ngx_int_t ngx_stream_redis_process_request(ngx_stream_session_t *s);
 ngx_int_t ngx_stream_redis_process_response(ngx_stream_session_t *s, ngx_buf_t *b);
 
 ngx_int_t

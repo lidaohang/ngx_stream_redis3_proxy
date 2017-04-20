@@ -1,3 +1,10 @@
+/*
+ * Author: lihang <lihanglucien@didichuxing.com>
+ *
+ * File: ngx_redis_protocol.h
+ * Create Date: 2017-01-20 12:03:15
+ *
+ */
 
 #include <ngx_config.h>
 #include <ngx_core.h>
@@ -120,6 +127,7 @@ ngx_stream_upstream_get_redis_peer(ngx_peer_connection_t *pc, void *data)
     ngx_stream_upstream_redis_peer_data_t *hp = data;
 
     time_t                          now;
+    ngx_int_t                       count = 0, max_try = 10;
     ngx_time_t                      *tp;
     ngx_uint_t                      rand_num;
     ngx_stream_upstream_rr_peer_t  *peer;
@@ -139,24 +147,39 @@ ngx_stream_upstream_get_redis_peer(ngx_peer_connection_t *pc, void *data)
 
     ngx_stream_upstream_rr_peers_wlock(hp->rrp.peers);
 
-//    if (hp->tries > 20 || hp->rrp.peers->single) {
-//        ngx_stream_upstream_rr_peers_unlock(hp->rrp.peers);
-//        return hp->get_rr_peer(pc, &hp->rrp);
-//    }
-
+    if (hp->tries > 10 || hp->rrp.peers->single) {
+        ngx_stream_upstream_rr_peers_unlock(hp->rrp.peers);
+        return hp->get_rr_peer(pc, &hp->rrp);
+    }
     now = ngx_time();
 
     pc->connection = NULL;
     peers = hp->rrp.peers;
 
-    if (ctx->node_ip.len == 0) {
+    if ((ctx->upstream_connect <= 0 && peers->number > 1) || ctx->node_ip.len == 0) {
         tp = ngx_timeofday();
         srand(tp->msec);
-        rand_num = rand() % hp->rrp.peers->number;
-        peer = &hp->rrp.peers->peer[rand_num];
 
-        ctx->node_ip = peer->name;
-        goto found;
+        for(;;) {
+
+            if ( count >= max_try ) {
+                break;
+            }
+            count++;
+
+            rand_num = rand() % hp->rrp.peers->number;
+            peer = &hp->rrp.peers->peer[rand_num];
+
+            if (ctx->node_ip.len == 0 || ctx->node_ip.data == NULL) {
+                ctx->node_ip = peer->name;
+                goto found;
+            }
+
+            if ( ngx_strncmp(peer->name.data, ctx->node_ip.data, ctx->node_ip.len) != 0 ) {
+                ctx->node_ip = peer->name;
+                goto found;
+            }
+        }
     }
 
     //peer = ngx_stream_redis_upstream_get_peer(ctx->cluster_name, ctx->node_ip);
@@ -191,6 +214,12 @@ found:
     }
 
     ngx_stream_upstream_rr_peers_unlock(hp->rrp.peers);
+
+    /*
+    if (pc->tries) {
+        pc->tries--;
+    }
+*/
 
     return NGX_OK;
 }

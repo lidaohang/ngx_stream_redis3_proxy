@@ -1,3 +1,11 @@
+/*
+ * Author: lihang <lihanglucien@didichuxing.com>
+ *
+ * File: ngx_redis_protocol.h
+ * Create Date: 2017-01-20 12:03:15
+ *
+ */
+
 #include "ngx_stream_redis_proxy_module.h"
 #include "ngx_stream_redis_interface.h"
 #include "common.h"
@@ -43,8 +51,8 @@ static void ngx_stream_redis_proxy_upstream_write_handler(ngx_event_t *rev);
 static void ngx_stream_redis_proxy_handler(ngx_stream_session_t *s);
 static void ngx_stream_redis_proxy_connect(ngx_stream_session_t *s);
 static void ngx_stream_redis_proxy_init_upstream(ngx_stream_session_t *s);
-//static void ngx_stream_redis_proxy_process_connection(ngx_event_t *ev,
-//    ngx_uint_t from_upstream);
+static void ngx_stream_redis_proxy_process_connection(ngx_event_t *ev,
+    ngx_uint_t from_upstream);
 static ngx_int_t ngx_stream_redis_proxy_test_connect(ngx_connection_t *c);
 
 static void ngx_stream_redis_proxy_next_upstream(ngx_stream_session_t *s);
@@ -183,9 +191,9 @@ ngx_stream_redis_proxy_send_buffer(ngx_stream_session_t *s,ngx_connection_t *dst
 {
     size_t                          size;
     ssize_t                         n = 0;
+    ngx_connection_t                *c;
 
-    ngx_log_error(NGX_LOG_INFO, dst->log, 0,
-                    "[redis_proxy] send_buffer len=[%d], buffer=[%s]",b->last - b->pos, b->pos);
+    c = s->connection;
 
     for ( ;; ) {
 
@@ -200,13 +208,12 @@ ngx_stream_redis_proxy_send_buffer(ngx_stream_session_t *s,ngx_connection_t *dst
                          "[stream_redis_proxy] send buffer_size is too small for"
                          "the request");
 
-                 ngx_stream_redis_proxy_finalize(s, NGX_ERROR);
                  return NGX_ERROR;
              }
 
              n = dst->send(dst, b->pos, size);
 
-             ngx_log_error(NGX_LOG_INFO, dst->log, 0,
+             ngx_log_debug1(NGX_LOG_DEBUG_STREAM, dst->log, 0,
                      "[stream_redis_proxy] send returns %z", n);
 
              if (n > 0) {
@@ -229,32 +236,24 @@ ngx_stream_redis_proxy_send_buffer(ngx_stream_session_t *s,ngx_connection_t *dst
     if (n == NGX_ERROR) {
         ngx_log_error(NGX_LOG_ERR, dst->log, 0,
                 "[stream_redis_proxy] n is  error");
+
         ngx_stream_redis_proxy_finalize(s, NGX_DECLINED);
-        return NGX_ERROR;
+        return NGX_DONE;
     }
 
     if ( n == NGX_AGAIN ) {
-        // NGX_AGAIN
+
         if (!dst->write->timer_set) {
             ngx_add_timer(dst->write, send_timeout);
         }
-        if (ngx_handle_write_event(dst->write, 0) != NGX_OK) {
-            ngx_log_error(NGX_LOG_ERR, dst->log, 0,
-                    "[stream_redis_proxy] again ngx_handle_write_event  is  error");
-            ngx_stream_redis_proxy_finalize(s, NGX_OK);
+
+        if ( !dst->shared && ngx_handle_write_event(dst->write, 0) != NGX_OK) {
             return NGX_ERROR;
         }
-        ngx_log_error(NGX_LOG_INFO, dst->log, 0, "[stream_redis_proxy] send_buffer again");
+
         return NGX_AGAIN;
     }
 
-
-    if (dst->write->timer_set) {
-        ngx_del_timer(dst->write);
-    }
-
-    ngx_log_error(NGX_LOG_INFO, dst->log, 0,
-                    "[redis_proxy] send_buffer is ok");
     return NGX_OK;
 }
 
@@ -262,11 +261,11 @@ ngx_stream_redis_proxy_send_buffer(ngx_stream_session_t *s,ngx_connection_t *dst
 static ngx_int_t
 ngx_stream_redis_proxy_read_request(ngx_stream_session_t *s)
 {
+    off_t                                   *received;
     ngx_buf_t                               *b;
     size_t                                  size;
     ssize_t                                 n;
     ngx_int_t                               rc;
-    ngx_log_handler_pt                      handler;
     ngx_connection_t                        *c, *src;
     ngx_stream_redis_proxy_ctx_t            *ctx;
     ngx_stream_redis_proxy_srv_conf_t       *pscf;
@@ -274,31 +273,18 @@ ngx_stream_redis_proxy_read_request(ngx_stream_session_t *s)
     c = s->connection;
     src = c;
 
-    if (c->type == SOCK_DGRAM && (ngx_terminate || ngx_exiting)) {
-
-        handler = c->log->handler;
-        c->log->handler = NULL;
-
-        ngx_log_error(NGX_LOG_INFO, c->log, 0, "disconnected on shutdown");
-        c->log->handler = handler;
-
-        ngx_stream_redis_proxy_finalize(s, NGX_OK);
-        return NGX_DONE;
-    }
-
     pscf = ngx_stream_get_module_srv_conf(s, ngx_stream_redis_proxy_module);
     if (pscf == NULL) {
-        ngx_stream_redis_proxy_finalize(s, NGX_ERROR);
         return NGX_ERROR;
     }
 
     ctx = ngx_stream_get_module_ctx(s, ngx_stream_redis_proxy_module);
     if (ctx == NULL) {
-        ngx_stream_redis_proxy_finalize(s, NGX_ERROR);
         return NGX_ERROR;
     }
 
     b = ctx->buffer_in;
+    received = &s->received;
 
     for ( ;; ) {
 
@@ -309,7 +295,6 @@ ngx_stream_redis_proxy_read_request(ngx_stream_session_t *s)
                     "[stream_redis_proxy] read request_buffer_size is too small for"
                     "the request");
 
-            ngx_stream_redis_proxy_finalize(s, NGX_ERROR);
             return NGX_ERROR;
         }
 
@@ -318,24 +303,23 @@ ngx_stream_redis_proxy_read_request(ngx_stream_session_t *s)
         ngx_log_debug1(NGX_LOG_DEBUG_STREAM, src->log, 0,
                 "[stream_redis_proxy] recv returns %z", n);
 
-        if (n >= 0) {
+        if (n > 0) {
 
-            if (n == 0) {
-                ctx->eof = 1;
-            }else {
-                ctx->read = 1;
-                b->last += n;
-            }
+            ctx->client_read = 0;
+
+            //增加接收的数据字节数
+            *received += n;
+
+            //缓冲区的末尾指针移动，表示收到了n字节新数据
+            b->last += n;
 
             ngx_log_debug1(NGX_LOG_DEBUG_STREAM, src->log, 0,
                     "[stream_redis_proxy] recv buffer=[%s]", b->pos);
-
 
             rc = redis_parse_req(s);
             if (rc == NGX_ERROR) {
                 ngx_log_error(NGX_LOG_ERR, src->log, 0,
                         "[stream_redis_proxy] redis_parse_req data=[%s]", b->pos);
-                ngx_stream_redis_proxy_finalize(s, NGX_ERROR);
                 return NGX_ERROR;
             }
 
@@ -348,16 +332,11 @@ ngx_stream_redis_proxy_read_request(ngx_stream_session_t *s)
             if (rc == NGX_ERROR) {
                 ngx_log_error(NGX_LOG_ERR, src->log, 0,
                         "[stream_redis_proxy] ngx_stream_redis_process_request data=[%s]", b->pos);
-                ngx_stream_redis_proxy_finalize(s, NGX_ERROR);
                 return NGX_ERROR;
             }
 
-            if (rc == NGX_OK) {
-                break;
-            }
-
-            //NGX_AGAIN 协议不完整
-            continue;
+            ctx->client_read = 1;
+            break;
         }
 
         break;
@@ -370,35 +349,27 @@ ngx_stream_redis_proxy_read_request(ngx_stream_session_t *s)
         }
 
         if (ngx_handle_read_event(src->read, 0) != NGX_OK) {
-            ngx_stream_redis_proxy_finalize(s, NGX_ERROR);
              return NGX_ERROR;
         }
 
-        return NGX_DONE;
+        return NGX_AGAIN;
     }
 
     if (n == NGX_ERROR) {
         src->read->eof = 1;
-    }
-
-    ngx_log_error(NGX_LOG_INFO, c->log, 0,
-                    "[redis_proxy] read_request buffer=[%s]", b->pos);
-
-    if (src->read->timer_set) {
-        ngx_del_timer(src->read);
+        return NGX_OK;
     }
 
     return NGX_OK;
 }
 
-
 static ngx_int_t
 ngx_stream_redis_proxy_read_upstream(ngx_stream_session_t *s)
 {
     ngx_int_t                               rc;
+    off_t                                   *received;
     ssize_t                                 size, n;
     ngx_buf_t                               *b;
-    ngx_log_handler_pt                      handler;
     ngx_connection_t                        *c, *dst, *pc, *src;
     ngx_stream_upstream_t                   *u;
     ngx_stream_redis_proxy_ctx_t            *ctx;
@@ -410,32 +381,19 @@ ngx_stream_redis_proxy_read_upstream(ngx_stream_session_t *s)
     src = pc;
     dst = c;
 
-
-    if (c->type == SOCK_DGRAM && (ngx_terminate || ngx_exiting)) {
-
-        handler = c->log->handler;
-        c->log->handler = NULL;
-
-        ngx_log_error(NGX_LOG_INFO, c->log, 0, "[stream_redis_proxy] disconnected on shutdown");
-        c->log->handler = handler;
-
-        ngx_stream_redis_proxy_finalize(s, NGX_OK);
-        return NGX_DONE;
-    }
-
     pscf = ngx_stream_get_module_srv_conf(s, ngx_stream_redis_proxy_module);
     if (pscf == NULL) {
-        ngx_stream_redis_proxy_finalize(s, NGX_ERROR);
         return NGX_ERROR;
     }
 
     ctx = ngx_stream_get_module_ctx(s, ngx_stream_redis_proxy_module);
     if (ctx == NULL) {
-        ngx_stream_redis_proxy_finalize(s, NGX_ERROR);
         return NGX_ERROR;
     }
 
     b = &u->upstream_buf;
+    received = &u->received;
+
     for ( ;; ) {
 
         size = b->end - b->last;
@@ -445,7 +403,6 @@ ngx_stream_redis_proxy_read_upstream(ngx_stream_session_t *s)
                     "[stream_redis_proxy] read upstream_buffer_size is too small for"
                     "the request");
 
-            ngx_stream_redis_proxy_finalize(s, NGX_ERROR);
             return NGX_ERROR;
         }
 
@@ -454,15 +411,15 @@ ngx_stream_redis_proxy_read_upstream(ngx_stream_session_t *s)
         ngx_log_debug1(NGX_LOG_DEBUG_STREAM, src->log, 0,
                 "[stream_redis_proxy] recv returns %z", n);
 
-        if (n >= 0) {
+        if (n > 0) {
 
-            ctx->read = 0;
+            ctx->upstream_read = 0;
 
-            if (n == 0) {
-                ctx->eof = 1;
-            }else {
-                b->last += n;
-            }
+            //增加接收的数据字节数
+             *received += n;
+
+            // 缓冲区的末尾指针移动，表示收到了n字节新数据
+            b->last += n;
 
             ngx_log_debug1(NGX_LOG_DEBUG_STREAM, src->log, 0,
                     "[stream_redis_proxy] recv buffer=[%s]", b->pos);
@@ -471,7 +428,6 @@ ngx_stream_redis_proxy_read_upstream(ngx_stream_session_t *s)
             if (rc == NGX_ERROR) {
                 ngx_log_error(NGX_LOG_ERR, src->log, 0,
                         "[stream_redis_proxy] redis_parse_rsp data=[%s]", b->pos);
-                ngx_stream_redis_proxy_finalize(s, NGX_ERROR);
                 return NGX_ERROR;
             }
 
@@ -484,17 +440,11 @@ ngx_stream_redis_proxy_read_upstream(ngx_stream_session_t *s)
             if (rc == NGX_ERROR) {
                 ngx_log_error(NGX_LOG_ERR, src->log, 0,
                         "[stream_redis_proxy] ngx_stream_redis_process_response data=[%s]", b->pos);
-                ngx_stream_redis_proxy_finalize(s, NGX_ERROR);
                 return NGX_ERROR;
             }
 
-            if (rc == NGX_OK) {
-                ctx->read = 1;
-                break;
-            }
-
-            //NGX_AGAIN 协议不完整
-            continue;
+            ctx->upstream_read = 1;
+            break;
         }
 
         break;
@@ -502,26 +452,20 @@ ngx_stream_redis_proxy_read_upstream(ngx_stream_session_t *s)
 
     if (n == NGX_ERROR) {
         src->read->eof = 1;
+        return NGX_OK;
     }
 
     if (n == NGX_AGAIN) {
 
         if (!src->read->timer_set) {
-            ngx_add_timer(src->read, pscf->upstream_read_timeout);
+            ngx_add_timer(src->read, pscf->timeout);
         }
-        if ( !src->shared && ngx_handle_read_event(src->read, 0) != NGX_OK) {
-            ngx_stream_redis_proxy_finalize(s, NGX_ERROR);
+
+        if ( !src->shared &&  ngx_handle_read_event(src->read, 0) != NGX_OK) {
             return NGX_ERROR;
         }
 
-        ngx_log_error(NGX_LOG_INFO, c->log, 0, "[stream_redis_proxy] read_upstream again");
-
-        return NGX_DONE;
-    }
-
-    //NGX_OK
-    if (src->read->timer_set) {
-        ngx_del_timer(src->read);
+        return NGX_AGAIN;
     }
 
     //重试
@@ -579,19 +523,54 @@ ngx_stream_redis_proxy_handler(ngx_stream_session_t *s)
 
 }
 
+static ngx_int_t
+ngx_stream_redis_read_request_check(ngx_stream_session_t *s, ngx_connection_t *src, ngx_connection_t *dst, ngx_stream_upstream_t *u)
+{
+    // 这时应该是src已经读完，数据也发送完
+    if (src && src->read->eof && u &&  (u->upstream_buf.pos == u->upstream_buf.last || (dst && dst->read->eof))) {
+
+        // 这时应该是src已经读完，数据也发送完
+        ngx_log_error(NGX_LOG_INFO, src->log, 0,
+                            "%s%s disconnected"
+                            ", bytes from/to client:%O/%O"
+                            ", bytes from/to upstream:%O/%O",
+                            "",
+                            "client",
+                            s->received, src->sent, u->received, dst->sent);
+
+        // 在这里记录访问日志
+        return NGX_OK;
+    }
+
+    return NGX_AGAIN;
+}
+
+
+
+
 static void
 ngx_stream_redis_read_request_handler(ngx_event_t *rev)
 {
     ngx_int_t                           rc;
-    ngx_connection_t                    *c;// *pc;
+    ngx_connection_t                    *c, *pc = NULL, *src = NULL, *dst = NULL;
     ngx_stream_session_t                *s;
+    ngx_stream_upstream_t                   *u;
     ngx_stream_redis_proxy_ctx_t        *ctx;
+    ngx_stream_redis_proxy_srv_conf_t       *pscf;
 
     c = rev->data;
     s = c->data;
+    u = s->upstream;
+    src = c;
 
-    ngx_log_error(NGX_LOG_INFO, c->log, 0, "ngx_stream_redis_read_request_handler");
+    if ( u ) {
+        pc = u->connected ? u->peer.connection : NULL;
+        dst = pc;
+    }
 
+    ngx_log_debug0(NGX_LOG_DEBUG_STREAM, c->log, 0, "ngx_stream_redis_read_request_handler");
+
+    pscf = ngx_stream_get_module_srv_conf(s, ngx_stream_redis_proxy_module);
     ctx = ngx_stream_get_module_ctx(s, ngx_stream_redis_proxy_module);
     if (ctx == NULL) {
         return;
@@ -606,11 +585,73 @@ ngx_stream_redis_read_request_handler(ngx_event_t *rev)
     }
 
     rc = ngx_stream_redis_proxy_read_request(s);
-    if ( rc != NGX_OK ) {
+    if ( rc == NGX_ERROR ) {
+        ngx_stream_redis_proxy_finalize(s, NGX_ERROR);
         return;
     }
 
-    ngx_stream_redis_proxy_connect(s);
+    if ( rc == NGX_AGAIN ) {
+        return;
+    }
+
+    if ( ctx->slotids == NULL || ctx->slotids->nelts == 0 ) {
+        rc = ngx_stream_redis_read_request_check(s, src, dst, u);
+        if ( rc == NGX_OK ) {
+            ngx_stream_redis_proxy_finalize(s, NGX_OK);
+            return;
+        }
+
+        ngx_stream_redis_proxy_connect(s);
+        return;
+    }
+
+    if ( ctx->slotids->nelts == 1 ) {
+        rc = ngx_stream_redis_read_request_check(s, src, dst, u);
+        if ( rc == NGX_OK ) {
+            ngx_stream_redis_proxy_finalize(s, NGX_OK);
+            return;
+        }
+
+        ctx->slotid = *(size_t *)ctx->slotids->elts;
+        rc = ngx_stream_redis_process_request(s);
+        if ( rc != NGX_OK ) {
+            ngx_stream_redis_proxy_finalize(s, NGX_ERROR);
+            return;
+        }
+        ngx_stream_redis_proxy_connect(s);
+        return;
+    }
+
+    ngx_stream_redis_proxy_finalize(s, NGX_OK);
+    return;
+
+/*
+    size_t i = 0;
+    for ( i = ctx->request_num; i < ctx->client_buffers->nelts; i++) {
+        rc = ngx_stream_redis_read_request_check(s, src, dst, u);
+        if ( rc != NGX_OK && ctx->request_num > 0) {
+             return;
+         }
+
+        ctx->slotid = *(size_t *)ctx->slotids->elts + i;
+        rc = ngx_stream_redis_process_request(s);
+        if ( rc != NGX_OK ) {
+            ngx_stream_redis_proxy_finalize(s, NGX_ERROR);
+            return;
+        }
+        ngx_str_t *buffers = (ngx_str_t *) ctx->client_buffers->elts + i;
+
+        ngx_log_error(NGX_LOG_INFO, c->log, 0, "%V", buffers);
+
+        ctx->buffer_in->pos = buffers->data;
+        ctx->buffer_in->last = buffers->data + buffers->len;
+        ctx->buffer_in->memory = 1;
+        ctx->buffer_in->last_buf = 1;
+
+        ngx_stream_redis_proxy_connect(s);
+        ctx->request_num++;
+    }
+*/
 }
 
 
@@ -619,11 +660,25 @@ ngx_stream_redis_write_request_handler(ngx_event_t *wev)
 {
     ngx_connection_t                    *c;
     ngx_stream_session_t                *s;
+    ngx_stream_redis_proxy_srv_conf_t       *pscf;
 
     c = wev->data;
     s = c->data;
 
-    ngx_log_error(NGX_LOG_INFO, c->log, 0, "ngx_stream_redis_write_request_handler");
+
+    ngx_log_debug0(NGX_LOG_DEBUG_STREAM, c->log, 0, "ngx_stream_redis_write_request_handler");
+
+    pscf = ngx_stream_get_module_srv_conf(s, ngx_stream_redis_proxy_module);
+
+    if (wev->timedout) {
+        c->timedout = 1;
+
+        ngx_connection_error(c, NGX_ETIMEDOUT, "connection timed out");
+        ngx_stream_redis_proxy_finalize(s, NGX_DECLINED);
+        return;
+    }
+
+    ngx_stream_redis_proxy_process_connection(wev, 1);
 }
 
 
@@ -704,7 +759,7 @@ ngx_stream_redis_proxy_connect(ngx_stream_session_t *s)
 
     u = s->upstream;
 
-    ngx_log_error(NGX_LOG_INFO, c->log, 0, "ngx_sream_redis_proxy_connect ");
+    ngx_log_debug0(NGX_LOG_DEBUG_STREAM, c->log, 0, "ngx_sream_redis_proxy_connect ");
 
     rc = ngx_event_connect_peer(&u->peer);
 
@@ -759,7 +814,7 @@ ngx_stream_redis_proxy_connect_handler(ngx_event_t *ev)
     c = ev->data;
     s = c->data;
 
-    ngx_log_error(NGX_LOG_INFO, c->log, 0, "ngx_stream_redis_proxy_connect_handler");
+    ngx_log_debug0(NGX_LOG_DEBUG_STREAM, c->log, 0, "ngx_stream_redis_proxy_connect_handler");
 
     ctx = ngx_stream_get_module_ctx(s, ngx_stream_redis_proxy_module);
     if (ctx == NULL) {
@@ -792,6 +847,7 @@ ngx_stream_redis_proxy_connect_handler(ngx_event_t *ev)
 static void
 ngx_stream_redis_proxy_init_upstream(ngx_stream_session_t *s)
 {
+    ngx_int_t                    rc;
     int                           tcp_nodelay;
     u_char                       *p;
     ngx_connection_t             *c, *pc;
@@ -844,12 +900,12 @@ ngx_stream_redis_proxy_init_upstream(ngx_stream_session_t *s)
         if (ngx_connection_local_sockaddr(pc, &str, 1) == NGX_OK) {
             handler = c->log->handler;
             c->log->handler = NULL;
-
+/*
             ngx_log_error(NGX_LOG_INFO, c->log, 0,
                           "%sproxy %V connected to %V",
                           pc->type == SOCK_DGRAM ? "udp " : "",
                           &str, u->peer.name);
-
+*/
             c->log->handler = handler;
         }
     }
@@ -878,89 +934,34 @@ ngx_stream_redis_proxy_init_upstream(ngx_stream_session_t *s)
         ngx_post_event(pc->read, &ngx_posted_events);
     }
 
-    ngx_log_error(NGX_LOG_INFO, c->log, 0, "ngx_stream_redis_proxy_init_upstream");
-    ngx_log_error(NGX_LOG_INFO, c->log, 0, "[redis_proxy] send buffer downstream_buf=[%s]", u->downstream_buf.pos);
+    ngx_log_debug0(NGX_LOG_DEBUG_STREAM, c->log, 0, "ngx_stream_redis_proxy_init_upstream");
+    ngx_log_debug1(NGX_LOG_DEBUG_STREAM, c->log, 0, "[redis_proxy] send buffer downstream_buf=[%s]", u->downstream_buf.pos);
 
-    ngx_stream_redis_proxy_send_buffer(s, pc, &u->downstream_buf, pscf->timeout);
+    rc = ngx_stream_redis_proxy_send_buffer(s, pc, &u->downstream_buf, pscf->timeout);
+    if (rc == NGX_ERROR ) {
+        ngx_stream_redis_proxy_finalize(s, NGX_ERROR);
+        return;
+    }
 }
-
 
 static void
 ngx_stream_redis_proxy_upstream_write_handler(ngx_event_t *wev)
 {
-    ngx_int_t                           rc;
-    ngx_connection_t                    *c;
-    ngx_stream_session_t                *s;
-    ngx_stream_upstream_t               *u;
-    ngx_stream_redis_proxy_ctx_t        *ctx;
-    ngx_stream_redis_proxy_srv_conf_t  *pscf;
-
-    c = wev->data;
-    s = c->data;
-    u = s->upstream;
-
-    ngx_log_error(NGX_LOG_INFO, c->log, 0,"ngx_stream_redis_proxy_upstream_write_handler");
-
-    pscf = ngx_stream_get_module_srv_conf(s, ngx_stream_redis_proxy_module);
-
-    ctx = ngx_stream_get_module_ctx(s, ngx_stream_redis_proxy_module);
-    if (ctx == NULL) {
-        ngx_stream_redis_proxy_finalize(s, NGX_ERROR);
-        return;
-    }
-
-    if (wev->timedout) {
-        c->timedout = 1;
-
-        ngx_connection_error(c, NGX_ETIMEDOUT, "connection timed out");
-        ngx_stream_redis_proxy_finalize(s, NGX_DECLINED);
-        return;
-    }
-
-
-    if ( ctx->read  ) {
-        rc = ngx_stream_redis_proxy_send_buffer(s, c, &u->upstream_buf, pscf->timeout);
-        if (rc == NGX_OK ) {
-                ngx_stream_redis_proxy_finalize(s, NGX_OK);
-                return;
-        }
-    }
-
-    //ngx_stream_redis_proxy_process_connection(wev, 0);
+    ngx_stream_redis_proxy_process_connection(wev, 0);
 }
 
 static void
 ngx_stream_redis_proxy_upstream_read_handler(ngx_event_t *rev)
 {
-    ngx_connection_t                    *c;
-    ngx_stream_session_t                *s;
-
-    c = rev->data;
-    s = c->data;
-
-    ngx_log_error(NGX_LOG_INFO, c->log, 0,"ngx_stream_redis_proxy_upstream_read_handler");
-
-    if (rev->timedout) {
-        c->timedout = 1;
-
-        ngx_connection_error(c, NGX_ETIMEDOUT, "connection timed out");
-        ngx_stream_redis_proxy_finalize(s, NGX_DECLINED);
-        return;
-    }
-
-    ngx_stream_redis_proxy_read_upstream(s);
-
-    //ngx_stream_redis_proxy_process_connection(rev, 1);
+    ngx_stream_redis_proxy_process_connection(rev, 1);
 }
 
-
-/*
 
 static void
 ngx_stream_redis_proxy_process_connection(ngx_event_t *ev, ngx_uint_t from_upstream)
 {
     ngx_int_t                    rc;
-    ngx_connection_t             *c, *pc;
+    ngx_connection_t             *c, *pc, *src, *dst;
     ngx_stream_session_t         *s;
     ngx_stream_upstream_t        *u;
     ngx_stream_redis_proxy_ctx_t *ctx;
@@ -969,9 +970,12 @@ ngx_stream_redis_proxy_process_connection(ngx_event_t *ev, ngx_uint_t from_upstr
     c = ev->data;
     s = c->data;
     u = s->upstream;
-
     c = s->connection;
     pc = u->peer.connection;
+    src = pc;
+    dst = c;
+
+    ngx_log_debug1(NGX_LOG_DEBUG_STREAM, c->log, 0, "ngx_stream_redis_upstream ev %d", ev->write);
 
     pscf = ngx_stream_get_module_srv_conf(s, ngx_stream_redis_proxy_module);
 
@@ -983,62 +987,77 @@ ngx_stream_redis_proxy_process_connection(ngx_event_t *ev, ngx_uint_t from_upstr
 
     if (ev->timedout) {
         ev->timedout = 0;
-
         if (ev->delayed) {
             ev->delayed = 0;
-
             if (!ev->ready) {
                 if (ngx_handle_read_event(ev, 0) != NGX_OK) {
                     ngx_stream_redis_proxy_finalize(s, NGX_ERROR);
                     return;
                 }
-
                 if (u->connected && !c->read->delayed && !pc->read->delayed) {
                     ngx_add_timer(c->write, pscf->timeout);
                 }
-
                 return;
             }
-
         } else {
             ngx_connection_error(c, NGX_ETIMEDOUT, "connection timed out");
             ngx_stream_redis_proxy_finalize(s, NGX_DECLINED);
             return;
         }
-
     } else if (ev->delayed) {
-
         ngx_log_debug0(NGX_LOG_DEBUG_STREAM, c->log, 0,
                        "stream connection delayed");
-
         if (ngx_handle_read_event(ev, 0) != NGX_OK) {
             ngx_stream_redis_proxy_finalize(s, NGX_ERROR);
         }
-
         return;
     }
-
     if (from_upstream && !u->connected) {
         return;
     }
 
-    ngx_log_error(NGX_LOG_INFO, c->log, 0, "ngx_stream_redis_proxy_process_connection1");
+    if (from_upstream && !ev->write) {
 
-    if ( ctx->read  ) {
-        ngx_log_error(NGX_LOG_INFO, c->log, 0, "[redis_proxy] send buffer upstream_buf=[%s]", u->upstream_buf.pos);
-        rc = ngx_stream_redis_proxy_send_buffer(s, c, &u->upstream_buf, pscf->timeout);
-        if (rc == NGX_OK ) {
-                ngx_stream_redis_proxy_finalize(s, NGX_OK);
-                return;
+        rc = ngx_stream_redis_proxy_read_upstream(s);
+        if ( rc == NGX_ERROR ) {
+             ngx_stream_redis_proxy_finalize(s, NGX_ERROR);
+            return;
         }
+        if ( rc == NGX_AGAIN ) {
+            return;
+        }
+        return;
     }
 
-    return;
+    if (ctx->upstream_read) {
+        rc = ngx_stream_redis_proxy_send_buffer(s, c, &u->upstream_buf, pscf->timeout);
+        if (rc == NGX_ERROR ) {
+            ngx_stream_redis_proxy_finalize(s, NGX_ERROR);
+            return;
+        }
+        if ( rc != NGX_OK ) {
+            return;
+        }
+        ctx->buffer_in->pos = ctx->buffer_in->start;
+        ctx->buffer_in->last = ctx->buffer_in->start;
+    }
+
+    // 这时应该是src已经读完，数据也发送完
+    if (src->read->eof && (u->upstream_buf.pos == u->upstream_buf.last || (dst && dst->read->eof))) {
+
+        // 这时应该是src已经读完，数据也发送完
+        ngx_log_error(NGX_LOG_INFO, c->log, 0,
+                            "%s%s disconnected"
+                            ", bytes from/to client:%O/%O"
+                            ", bytes from/to upstream:%O/%O",
+                            c->type == SOCK_DGRAM ? "udp " : "",
+                            from_upstream ? "upstream" : "client",
+                            s->received, c->sent, u->received, pc ? pc->sent : 0);
+
+        // 在这里记录访问日志
+        ngx_stream_redis_proxy_finalize(s, NGX_OK);
+    }
 }
-*/
-
-
-
 
 static ngx_int_t
 ngx_stream_redis_proxy_test_connect(ngx_connection_t *c)
@@ -1092,7 +1111,7 @@ ngx_stream_redis_proxy_next_upstream(ngx_stream_session_t *s)
     ngx_stream_redis_proxy_srv_conf_t  *pscf;
     ngx_stream_redis_proxy_ctx_t        *ctx;
 
-    ngx_log_error(NGX_LOG_INFO, s->connection->log, 0,
+    ngx_log_debug0(NGX_LOG_DEBUG_STREAM, s->connection->log, 0,
                    "stream proxy next upstream");
 
     u = s->upstream;
@@ -1254,7 +1273,7 @@ ngx_stream_redis_proxy_merge_srv_conf(ngx_conf_t *cf, void *parent, void *child)
                               prev->next_upstream_timeout, 0);
 
     ngx_conf_merge_size_value(conf->buffer_size,
-                              prev->buffer_size, 102400000000);
+                              prev->buffer_size, 1638400);
 
     ngx_conf_merge_size_value(conf->upload_rate,
                               prev->upload_rate, 0);
@@ -1316,7 +1335,7 @@ ngx_stream_redis_proxy_pass(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
 static ngx_int_t
 ngx_stream_redis_proxy_init_process(ngx_cycle_t *cycle)
 {
-    ngx_log_error(NGX_LOG_DEBUG, cycle->log, 0, "[redis_proxy] init process");
+    ngx_log_debug0(NGX_LOG_DEBUG_STREAM, cycle->log, 0, "[redis_proxy] init process");
 
     ngx_stream_redis_init();
 
@@ -1327,7 +1346,10 @@ ngx_stream_redis_proxy_init_process(ngx_cycle_t *cycle)
 static void
 ngx_stream_redis_proxy_exit_process(ngx_cycle_t *cycle)
 {
-    ngx_log_error(NGX_LOG_DEBUG, cycle->log, 0, "[redis_proxy] exit process");
+    ngx_log_debug0(NGX_LOG_DEBUG_STREAM, cycle->log, 0, "[redis_proxy] exit process");
 
     ngx_stream_redis_destroy();
 }
+
+
+

@@ -1,23 +1,20 @@
 ngx_addon_name=ngx_stream_redis_proxy_module
 
+ngx_stream_incs="/usr/local/include"
+ngx_stream_libs="/usr/local/lib/libhiredis.a"
+
+
 STREAM_MODULES="$STREAM_MODULES ngx_stream_redis_proxy_module"
 NGX_ADDON_SRCS="$NGX_ADDON_SRCS
 $ngx_addon_dir/ngx_stream_redis_proxy_module.c
 $ngx_addon_dir/ngx_stream_upstream_util.c
 $ngx_addon_dir/ngx_stream_redis_interface.cpp
-$ngx_addon_dir/redis_handler.cpp
-$ngx_addon_dir/redis_parser.cpp
-$ngx_addon_dir/redis_proto.cpp
-$ngx_addon_dir/redis_cluster.cpp
-$ngx_addon_dir/redis_node.cpp
-$ngx_addon_dir/redis_slot.cpp
-$ngx_addon_dir/short_string.cpp
-$ngx_addon_dir/string_util.cpp
-$ngx_addon_dir/long_hash_value.cpp"
+$ngx_addon_dir/ngx_redis_proto.c
+$ngx_addon_dir/redis_node.cpp"
 
 STREAM_MODULES="$STREAM_MODULES ngx_stream_upstream_redis_module"
 NGX_ADDON_SRCS="$NGX_ADDON_SRCS
 $ngx_addon_dir/ngx_stream_upstream_redis_module.c"
 
-CORE_INCS="$CORE_INCS $ngx_addon_dir"
-CORE_LIBS="$CORE_LIBS -ldl -lstdc++"
+CORE_INCS="$CORE_INCS $ngx_addon_dir $ngx_stream_incs"
+CORE_LIBS="$CORE_LIBS $ngx_stream_libs -ldl -lstdc++"
