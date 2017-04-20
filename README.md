@@ -167,3 +167,11 @@ redis-cli -p 8015 get abc
 - ZREVRANGEBYSCORE
 - ZUNIONSTORE
 - ZSCAN
+
+
+#### todo列表
+- 批量接口
+- lua脚本
+- 多个upstream怎么合并buffer，然后在发送给用户
+- 动态upstream问题待跟进
+
